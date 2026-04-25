@@ -511,6 +511,7 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
   const priorTime = videoEl.currentTime;
   const priorMuted = videoEl.muted;
   const priorVolume = videoEl.volume;
+  const priorPlaybackRate = videoEl.playbackRate;
 
   try {
     // Avoid audible glitches while seeking/playing tiny snippets.
@@ -518,86 +519,91 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
     // so prefer volume=0 with muted=false.
     videoEl.muted = false;
     videoEl.volume = 0;
+    // Streaming analyser approach:
+    // Instead of doing hundreds of seeks (slow + flaky), play through once at high playbackRate,
+    // continuously sample analyser bins, and fill columns as time advances.
     if (!wasPaused) videoEl.pause();
+    await seekVideo(videoEl, 0);
 
-    // Small settle time after each seek so the audio pipeline updates.
-    const settleMs = 300;
+    const minBin = 1;
+    const maxBin = bins - 1;
+    const logMin = Math.log(minBin);
+    const logMax = Math.log(maxBin);
 
-    for (let x = 0; x < cols; x++) {
-      const t = (x / Math.max(1, cols - 1)) * duration;
-      setStatus(`Generating spectrogram… ${x + 1}/${cols}`);
-      await seekVideo(videoEl, t);
+    // Track which columns have been painted.
+    const painted = new Uint8Array(cols);
+    let paintedCount = 0;
 
-      // Kick the media element briefly to drive the audio graph.
-      // Some browsers won't update analyser data for a paused element.
-      let played = false;
-      try {
-        await videoEl.play();
-        played = true;
-      } catch {
-        // If autoplay is blocked, we still try to sample after a short delay; it may work on some browsers.
-        played = false;
-      }
-      if (played) {
-        // Wait for the pipeline to actually start, then for at least one update tick (or timeout), then pause.
-        await waitForEventOrTimeout(videoEl, "playing", settleMs);
-        await waitForEventOrTimeout(videoEl, "timeupdate", settleMs);
-        videoEl.pause();
-      } else {
-        await waitMs(settleMs);
-      }
+    // Use the fastest playbackRate the browser will reasonably allow.
+    // (Some browsers clamp this; that's fine.)
+    const targetRate = 16;
+    videoEl.playbackRate = targetRate;
 
-      analyser.getFloatFrequencyData(freqDb); // dB values
+    // Start playback to drive analyser.
+    await videoEl.play();
+    await waitForEventOrTimeout(videoEl, "playing", 1000);
 
-      // If the analyser returns all-min values (common when the pipeline isn't producing audio yet),
-      // retry once with a longer settle.
-      let allMin = true;
+    const startWall = performance.now();
+
+    while (paintedCount < cols) {
+      const t = videoEl.currentTime;
+      if (!Number.isFinite(t)) break;
+      const x = Math.min(cols - 1, Math.max(0, Math.floor((t / duration) * (cols - 1))));
+
+      analyser.getFloatFrequencyData(freqDb);
+
+      // Detect dead analyser output (all min dB) and just keep going; this often resolves once decoding catches up.
+      let hasSignal = false;
       for (let i = 0; i < freqDb.length; i++) {
         const v = freqDb[i];
         if (Number.isFinite(v) && v > analyser.minDecibels + 1) {
-          allMin = false;
+          hasSignal = true;
           break;
         }
       }
-      if (allMin) {
-        if (played) {
-          await videoEl.play().catch(() => {});
-          await waitForEventOrTimeout(videoEl, "timeupdate", settleMs * 2);
-          videoEl.pause();
-        } else {
-          await waitMs(settleMs * 2);
+
+      if (hasSignal && painted[x] === 0) {
+        for (let y = 0; y < outH; y++) {
+          const fy = 1 - y / (outH - 1);
+          const logBin = logMin + fy * (logMax - logMin);
+          const b = Math.min(maxBin, Math.max(minBin, Math.round(Math.exp(logBin))));
+
+          const rawDb = freqDb[b];
+          const db = Number.isFinite(rawDb) ? rawDb : analyser.minDecibels;
+          const v = clamp01((db + 90) / 80);
+
+          const i = y * 4;
+          const r = Math.round(255 * Math.pow(v, 0.85));
+          const g = Math.round(220 * Math.pow(v, 1.35));
+          const bb = Math.round(255 * (0.15 + 0.85 * Math.pow(v, 0.7)));
+          colData[i] = r;
+          colData[i + 1] = g;
+          colData[i + 2] = bb;
+          colData[i + 3] = 255;
         }
-        analyser.getFloatFrequencyData(freqDb);
+
+        ctxSample.putImageData(imgCol, x, 0);
+        painted[x] = 1;
+        paintedCount++;
       }
 
-      // Map frequency bins to output rows (log-ish), then to color.
-      const minBin = 1;
-      const maxBin = bins - 1;
-      const logMin = Math.log(minBin);
-      const logMax = Math.log(maxBin);
+      // Progress
+      const frac = paintedCount / cols;
+      const elapsed = (performance.now() - startWall) / 1000;
+      const eta = frac > 0.02 ? Math.round((elapsed * (1 - frac)) / frac) : null;
+      setStatus(`Generating spectrogram… ${paintedCount}/${cols}${eta ? ` (ETA ~${eta}s)` : ""}`);
 
-      for (let y = 0; y < outH; y++) {
-        const fy = 1 - y / (outH - 1);
-        const logBin = logMin + fy * (logMax - logMin);
-        const b = Math.min(maxBin, Math.max(minBin, Math.round(Math.exp(logBin))));
+      // Stop when we reach the end.
+      if (t >= duration - 0.05) break;
 
-        // freqDb is already dBFS-ish; normalize to [0..1]
-        const rawDb = freqDb[b];
-        const db = Number.isFinite(rawDb) ? rawDb : analyser.minDecibels; // handle -Infinity / NaN
-        const v = clamp01((db + 90) / 80); // [-90..-10] -> [0..1]
+      // Yield to UI; analyser updates are ~60Hz-ish.
+      await waitMs(16);
 
-        const i = y * 4;
-        const r = Math.round(255 * Math.pow(v, 0.85));
-        const g = Math.round(220 * Math.pow(v, 1.35));
-        const bb = Math.round(255 * (0.15 + 0.85 * Math.pow(v, 0.7)));
-        colData[i] = r;
-        colData[i + 1] = g;
-        colData[i + 2] = bb;
-        colData[i + 3] = 255;
-      }
-
-      ctxSample.putImageData(imgCol, x, 0);
+      // Safety: if something goes wrong (e.g. time doesn't advance), avoid an infinite loop.
+      if (performance.now() - startWall > 120000) break; // 2 minutes max
     }
+
+    videoEl.pause();
 
     // Scale to full canvas width.
     ctxOut.clearRect(0, 0, outW, outH);
@@ -606,6 +612,7 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
     setStatus("");
     videoEl.volume = priorVolume;
     videoEl.muted = priorMuted;
+    videoEl.playbackRate = priorPlaybackRate;
     await seekVideo(videoEl, priorTime);
     if (!wasPaused) videoEl.play().catch(() => {});
   }
