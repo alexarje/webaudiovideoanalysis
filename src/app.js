@@ -110,7 +110,7 @@ async function seekVideo(videoEl, t) {
   if (!Number.isFinite(target)) return;
   if (Math.abs(videoEl.currentTime - target) < 1e-4) return;
   videoEl.currentTime = target;
-  if (videoEl.readyState >= 2) return;
+  // Always wait for the seek to complete; readyState can already be >= 2 while a seek is still pending.
   await waitForEvent(videoEl, "seeked");
 }
 
@@ -153,7 +153,10 @@ async function generateVideogram({ videoEl, canvas, columns }) {
   if (!Number.isFinite(duration) || duration <= 0) throw new Error("Video duration unavailable.");
 
   const { w: outW, h: outH } = setCanvasBackingStoreSize(canvas, 100);
+  // Render one output column per output pixel to avoid duplicated/skipped columns.
+  // (Using Math.round mapping caused multiple samples to land on the same pixel for many widths.)
   const cols = Math.max(8, Math.min(columns ?? outW, outW));
+  const colsToRender = outW;
   const ctxOut = canvas.getContext("2d", { alpha: false });
   ctxOut.imageSmoothingEnabled = false;
   ctxOut.fillStyle = "#0f1620";
@@ -175,9 +178,9 @@ async function generateVideogram({ videoEl, canvas, columns }) {
   try {
     if (!wasPaused) videoEl.pause();
 
-    for (let x = 0; x < cols; x++) {
-      const t = (x / (cols - 1)) * duration;
-      setStatus(`Generating videogram… ${x + 1}/${cols}`);
+    for (let outX = 0; outX < colsToRender; outX++) {
+      const t = (outX / Math.max(1, colsToRender - 1)) * duration;
+      setStatus(`Generating videogram… ${outX + 1}/${colsToRender}`);
       await seekVideo(videoEl, t);
 
       ctxTmp.drawImage(videoEl, 0, 0, decodeW, decodeH);
@@ -197,7 +200,6 @@ async function generateVideogram({ videoEl, canvas, columns }) {
         colData[i + 3] = 255;
       }
 
-      const outX = Math.round((x / (cols - 1)) * (outW - 1));
       ctxOut.putImageData(imgCol, outX, 0);
     }
   } finally {
