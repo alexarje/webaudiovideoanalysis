@@ -510,14 +510,18 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
   const wasPaused = videoEl.paused;
   const priorTime = videoEl.currentTime;
   const priorMuted = videoEl.muted;
+  const priorVolume = videoEl.volume;
 
   try {
-    // Mute to avoid audible glitches while we seek/play tiny snippets.
-    videoEl.muted = true;
+    // Avoid audible glitches while seeking/playing tiny snippets.
+    // Some browsers effectively treat muted media element audio as silence upstream of the analyser,
+    // so prefer volume=0 with muted=false.
+    videoEl.muted = false;
+    videoEl.volume = 0;
     if (!wasPaused) videoEl.pause();
 
     // Small settle time after each seek so the audio pipeline updates.
-    const settleMs = 120;
+    const settleMs = 300;
 
     for (let x = 0; x < cols; x++) {
       const t = (x / Math.max(1, cols - 1)) * duration;
@@ -535,7 +539,8 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
         played = false;
       }
       if (played) {
-        // Wait for at least one update tick (or timeout), then pause.
+        // Wait for the pipeline to actually start, then for at least one update tick (or timeout), then pause.
+        await waitForEventOrTimeout(videoEl, "playing", settleMs);
         await waitForEventOrTimeout(videoEl, "timeupdate", settleMs);
         videoEl.pause();
       } else {
@@ -543,6 +548,27 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
       }
 
       analyser.getFloatFrequencyData(freqDb); // dB values
+
+      // If the analyser returns all-min values (common when the pipeline isn't producing audio yet),
+      // retry once with a longer settle.
+      let allMin = true;
+      for (let i = 0; i < freqDb.length; i++) {
+        const v = freqDb[i];
+        if (Number.isFinite(v) && v > analyser.minDecibels + 1) {
+          allMin = false;
+          break;
+        }
+      }
+      if (allMin) {
+        if (played) {
+          await videoEl.play().catch(() => {});
+          await waitForEventOrTimeout(videoEl, "timeupdate", settleMs * 2);
+          videoEl.pause();
+        } else {
+          await waitMs(settleMs * 2);
+        }
+        analyser.getFloatFrequencyData(freqDb);
+      }
 
       // Map frequency bins to output rows (log-ish), then to color.
       const minBin = 1;
@@ -578,6 +604,7 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
     ctxOut.drawImage(sampleCanvas, 0, 0, outW, outH);
   } finally {
     setStatus("");
+    videoEl.volume = priorVolume;
     videoEl.muted = priorMuted;
     await seekVideo(videoEl, priorTime);
     if (!wasPaused) videoEl.play().catch(() => {});
