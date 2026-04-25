@@ -480,6 +480,125 @@ async function waitMs(ms) {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+function drawWaveformColumn({ colData, outH, amp01 }) {
+  // Render a vertical amplitude bar centered in the canvas.
+  const mid = (outH - 1) / 2;
+  const half = Math.max(0, Math.min(mid, amp01 * mid));
+
+  for (let y = 0; y < outH; y++) {
+    const i = y * 4;
+    // Background
+    let r = 10,
+      g = 16,
+      b = 28;
+
+    // Waveform bar
+    if (Math.abs(y - mid) <= half) {
+      // Slight gradient: brighter near center
+      const d = 1 - Math.min(1, Math.abs(y - mid) / (half + 1e-6));
+      r = Math.round(120 + 100 * d);
+      g = Math.round(180 + 60 * d);
+      b = Math.round(255 * (0.85 + 0.15 * d));
+    }
+
+    colData[i] = r;
+    colData[i + 1] = g;
+    colData[i + 2] = b;
+    colData[i + 3] = 255;
+  }
+}
+
+async function generateWaveformFromMediaElement({ videoEl, canvas }) {
+  await ensureVideoLoadedMetadata(videoEl);
+  const duration = videoEl.duration;
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error("Video duration unavailable.");
+
+  const { w: outW, h: outH } = setCanvasBackingStoreSize(canvas, 100);
+  const cols = Math.max(256, Math.min(1200, outW));
+
+  setStatus("Preparing waveform…");
+  const { analyser } = await ensureMediaAudioGraph(videoEl, 2048);
+  analyser.smoothingTimeConstant = 0.8;
+
+  const time = new Float32Array(analyser.fftSize);
+
+  const sampleCanvas = makeTempCanvas(cols, outH);
+  const ctxSample = sampleCanvas.getContext("2d", { alpha: false });
+  ctxSample.imageSmoothingEnabled = false;
+  ctxSample.fillStyle = "#0f1620";
+  ctxSample.fillRect(0, 0, cols, outH);
+
+  const imgCol = ctxSample.createImageData(1, outH);
+  const colData = imgCol.data;
+
+  const ctxOut = canvas.getContext("2d", { alpha: false });
+  ctxOut.imageSmoothingEnabled = false;
+  ctxOut.fillStyle = "#0f1620";
+  ctxOut.fillRect(0, 0, outW, outH);
+
+  const wasPaused = videoEl.paused;
+  const priorTime = videoEl.currentTime;
+  const priorMuted = videoEl.muted;
+  const priorVolume = videoEl.volume;
+  const priorPlaybackRate = videoEl.playbackRate;
+
+  try {
+    videoEl.muted = false;
+    videoEl.volume = 0;
+    if (!wasPaused) videoEl.pause();
+    await seekVideo(videoEl, 0);
+
+    // Stream through quickly and paint amplitude over time.
+    videoEl.playbackRate = 16;
+    await videoEl.play();
+    await waitForEventOrTimeout(videoEl, "playing", 1000);
+
+    const painted = new Uint8Array(cols);
+    let paintedCount = 0;
+    const startWall = performance.now();
+
+    while (paintedCount < cols) {
+      const t = videoEl.currentTime;
+      if (!Number.isFinite(t)) break;
+      const x = Math.min(cols - 1, Math.max(0, Math.floor((t / duration) * (cols - 1))));
+
+      analyser.getFloatTimeDomainData(time);
+      // RMS amplitude
+      let s = 0;
+      for (let i = 0; i < time.length; i++) s += time[i] * time[i];
+      const rms = Math.sqrt(s / time.length);
+      const amp = clamp01(rms * 6); // scale factor tuned for typical media levels
+
+      if (painted[x] === 0) {
+        drawWaveformColumn({ colData, outH, amp01: amp });
+        ctxSample.putImageData(imgCol, x, 0);
+        painted[x] = 1;
+        paintedCount++;
+      }
+
+      const frac = paintedCount / cols;
+      const elapsed = (performance.now() - startWall) / 1000;
+      const eta = frac > 0.02 ? Math.round((elapsed * (1 - frac)) / frac) : null;
+      setStatus(`Generating waveform… ${paintedCount}/${cols}${eta ? ` (ETA ~${eta}s)` : ""}`);
+
+      if (t >= duration - 0.05) break;
+      await waitMs(16);
+      if (performance.now() - startWall > 120000) break;
+    }
+
+    videoEl.pause();
+    ctxOut.clearRect(0, 0, outW, outH);
+    ctxOut.drawImage(sampleCanvas, 0, 0, outW, outH);
+  } finally {
+    setStatus("");
+    videoEl.volume = priorVolume;
+    videoEl.muted = priorMuted;
+    videoEl.playbackRate = priorPlaybackRate;
+    await seekVideo(videoEl, priorTime);
+    if (!wasPaused) videoEl.play().catch(() => {});
+  }
+}
+
 async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
   await ensureVideoLoadedMetadata(videoEl);
   const duration = videoEl.duration;
@@ -625,7 +744,8 @@ async function generateSpectrogram({ file, canvas }) {
   const safeDecodeLimit = Math.floor(twoGb * 0.85);
 
   if (file.size > safeDecodeLimit) {
-    await generateSpectrogramFromMediaElement({ videoEl: els.video, canvas });
+    // For very large files, waveform is more stable than trying to compute a spectrogram from the media element.
+    await generateWaveformFromMediaElement({ videoEl: els.video, canvas });
     return;
   }
 
@@ -659,8 +779,8 @@ async function generateSpectrogram({ file, canvas }) {
     // If decode fails (including >2GB errors), fall back to analyser sampling.
     const msg = String(e?.message || e);
     if (msg.includes("decodeAudioData") || msg.includes("2 GB") || msg.includes("2GB")) {
-      console.warn("decodeAudioData failed; falling back to analyser sampling.", e);
-      await generateSpectrogramFromMediaElement({ videoEl: els.video, canvas });
+      console.warn("decodeAudioData failed; falling back to waveform.", e);
+      await generateWaveformFromMediaElement({ videoEl: els.video, canvas });
       return;
     }
     throw e;
