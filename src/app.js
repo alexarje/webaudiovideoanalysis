@@ -437,32 +437,180 @@ async function downsampleAudioToMono(audioBuffer, targetSampleRate) {
   return { samples: rendered.getChannelData(0), sampleRate: rendered.sampleRate };
 }
 
+/** @type {{ audioCtx: AudioContext, src: MediaElementAudioSourceNode, analyser: AnalyserNode, freqDb: Float32Array } | null} */
+let mediaAudioGraph = null;
+
+async function ensureMediaAudioGraph(videoEl, fftSize = 2048) {
+  if (mediaAudioGraph) return mediaAudioGraph;
+
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  // File picker interaction should allow resume, but do it defensively.
+  if (audioCtx.state !== "running") {
+    try {
+      await audioCtx.resume();
+    } catch {
+      // ignore; will fail later if user gesture is missing
+    }
+  }
+
+  const src = audioCtx.createMediaElementSource(videoEl);
+  const analyser = audioCtx.createAnalyser();
+  analyser.fftSize = fftSize;
+  analyser.smoothingTimeConstant = 0;
+  analyser.minDecibels = -100;
+  analyser.maxDecibels = -10;
+
+  // Route to destination so the graph actually runs. We'll mute the <video> element during sampling.
+  src.connect(analyser);
+  analyser.connect(audioCtx.destination);
+
+  const freqDb = new Float32Array(analyser.frequencyBinCount);
+  mediaAudioGraph = { audioCtx, src, analyser, freqDb };
+  return mediaAudioGraph;
+}
+
+async function waitMs(ms) {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
+  await ensureVideoLoadedMetadata(videoEl);
+  const duration = videoEl.duration;
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error("Video duration unavailable.");
+
+  const { w: outW, h: outH } = setCanvasBackingStoreSize(canvas, 100);
+  const cols = Math.max(256, Math.min(800, outW));
+
+  setStatus("Preparing audio analyser…");
+  const { analyser, freqDb } = await ensureMediaAudioGraph(videoEl, 2048);
+  const bins = analyser.frequencyBinCount;
+
+  // Render at sampling resolution then scale to full width.
+  const sampleCanvas = makeTempCanvas(cols, outH);
+  const ctxSample = sampleCanvas.getContext("2d", { alpha: false });
+  ctxSample.imageSmoothingEnabled = false;
+  ctxSample.fillStyle = "#0f1620";
+  ctxSample.fillRect(0, 0, cols, outH);
+
+  const imgCol = ctxSample.createImageData(1, outH);
+  const colData = imgCol.data;
+
+  const ctxOut = canvas.getContext("2d", { alpha: false });
+  ctxOut.imageSmoothingEnabled = false;
+  ctxOut.fillStyle = "#0f1620";
+  ctxOut.fillRect(0, 0, outW, outH);
+
+  const wasPaused = videoEl.paused;
+  const priorTime = videoEl.currentTime;
+  const priorMuted = videoEl.muted;
+
+  try {
+    // Mute to avoid audible glitches while we seek/play tiny snippets.
+    videoEl.muted = true;
+    if (!wasPaused) videoEl.pause();
+
+    // Small settle time after each seek so the audio pipeline updates.
+    const settleMs = 60;
+
+    for (let x = 0; x < cols; x++) {
+      const t = (x / Math.max(1, cols - 1)) * duration;
+      setStatus(`Generating spectrogram… ${x + 1}/${cols}`);
+      await seekVideo(videoEl, t);
+
+      // Kick the media element briefly to drive the audio graph.
+      // Some browsers won't update analyser data for a paused element.
+      await videoEl.play().catch(() => {});
+      await waitMs(settleMs);
+      videoEl.pause();
+
+      analyser.getFloatFrequencyData(freqDb); // dB values
+
+      // Map frequency bins to output rows (log-ish), then to color.
+      const minBin = 1;
+      const maxBin = bins - 1;
+      const logMin = Math.log(minBin);
+      const logMax = Math.log(maxBin);
+
+      for (let y = 0; y < outH; y++) {
+        const fy = 1 - y / (outH - 1);
+        const logBin = logMin + fy * (logMax - logMin);
+        const b = Math.min(maxBin, Math.max(minBin, Math.round(Math.exp(logBin))));
+
+        // freqDb is already dBFS-ish; normalize to [0..1]
+        const db = freqDb[b]; // e.g. [-100..-10]
+        const v = clamp01((db + 90) / 80); // [-90..-10] -> [0..1]
+
+        const i = y * 4;
+        const r = Math.round(255 * Math.pow(v, 0.85));
+        const g = Math.round(220 * Math.pow(v, 1.35));
+        const bb = Math.round(255 * (0.15 + 0.85 * Math.pow(v, 0.7)));
+        colData[i] = r;
+        colData[i + 1] = g;
+        colData[i + 2] = bb;
+        colData[i + 3] = 255;
+      }
+
+      ctxSample.putImageData(imgCol, x, 0);
+    }
+
+    // Scale to full canvas width.
+    ctxOut.clearRect(0, 0, outW, outH);
+    ctxOut.drawImage(sampleCanvas, 0, 0, outW, outH);
+  } finally {
+    setStatus("");
+    videoEl.muted = priorMuted;
+    await seekVideo(videoEl, priorTime);
+    if (!wasPaused) videoEl.play().catch(() => {});
+  }
+}
+
 async function generateSpectrogram({ file, canvas }) {
-  setStatus("Decoding audio…");
-  const audioBuffer = await decodeAudioFromFile(file);
-  setStatus("Downsampling audio…");
-  const { samples: mono, sampleRate } = await downsampleAudioToMono(audioBuffer, 11025);
+  // decodeAudioData has a hard 2GB limit for the input ArrayBuffer.
+  // For very large video files, fall back to sampling via a MediaElementAudioSource + AnalyserNode.
+  const twoGb = 2 * 1024 * 1024 * 1024;
+  const safeDecodeLimit = Math.floor(twoGb * 0.85);
 
-  // For a 100px-tall display, we can use a smaller FFT and fewer frames.
-  const fftSize = 1024;
-  const hopSize = 256;
+  if (file.size > safeDecodeLimit) {
+    await generateSpectrogramFromMediaElement({ videoEl: els.video, canvas });
+    return;
+  }
 
-  // Only compute the number of time-columns we will render (then scale to full width if needed).
-  const { w: outW } = setCanvasBackingStoreSize(canvas, 100);
-  const cols = Math.max(256, Math.min(900, outW));
+  try {
+    setStatus("Decoding audio…");
+    const audioBuffer = await decodeAudioFromFile(file);
+    setStatus("Downsampling audio…");
+    const { samples: mono, sampleRate } = await downsampleAudioToMono(audioBuffer, 11025);
 
-  setStatus(`Computing spectrogram… 0/${cols}`);
-  const stft = stftMagnitudeSampled({
-    samples: mono,
-    sampleRate,
-    fftSize,
-    hopSize,
-    sampleColumns: cols,
-  });
+    // For a 100px-tall display, we can use a smaller FFT and fewer frames.
+    const fftSize = 1024;
+    const hopSize = 256;
 
-  setStatus("Rendering spectrogram…");
-  renderSpectrogramToCanvas({ canvas, stft, widthPx: cols });
-  setStatus("");
+    // Only compute the number of time-columns we will render (then scale to full width if needed).
+    const { w: outW } = setCanvasBackingStoreSize(canvas, 100);
+    const cols = Math.max(256, Math.min(900, outW));
+
+    setStatus(`Computing spectrogram… 0/${cols}`);
+    const stft = stftMagnitudeSampled({
+      samples: mono,
+      sampleRate,
+      fftSize,
+      hopSize,
+      sampleColumns: cols,
+    });
+
+    setStatus("Rendering spectrogram…");
+    renderSpectrogramToCanvas({ canvas, stft, widthPx: cols });
+    setStatus("");
+  } catch (e) {
+    // If decode fails (including >2GB errors), fall back to analyser sampling.
+    const msg = String(e?.message || e);
+    if (msg.includes("decodeAudioData") || msg.includes("2 GB") || msg.includes("2GB")) {
+      console.warn("decodeAudioData failed; falling back to analyser sampling.", e);
+      await generateSpectrogramFromMediaElement({ videoEl: els.video, canvas });
+      return;
+    }
+    throw e;
+  }
 }
 
 async function regenerateAll() {
