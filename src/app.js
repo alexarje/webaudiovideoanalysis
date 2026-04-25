@@ -153,14 +153,22 @@ async function generateVideogram({ videoEl, canvas, columns }) {
   if (!Number.isFinite(duration) || duration <= 0) throw new Error("Video duration unavailable.");
 
   const { w: outW, h: outH } = setCanvasBackingStoreSize(canvas, 100);
-  // Render one output column per output pixel to avoid duplicated/skipped columns.
-  // (Using Math.round mapping caused multiple samples to land on the same pixel for many widths.)
-  const cols = Math.max(8, Math.min(columns ?? outW, outW));
-  const colsToRender = outW;
   const ctxOut = canvas.getContext("2d", { alpha: false });
   ctxOut.imageSmoothingEnabled = false;
   ctxOut.fillStyle = "#0f1620";
   ctxOut.fillRect(0, 0, outW, outH);
+
+  // Choose how many time samples to take.
+  // Goal: keep "frame count" correct (progress reflects actual samples) while skipping work for
+  // long videos / very wide canvases (e.g. high-DPR screens).
+  //
+  // - Upper bound prevents thousands of seeks on 4k+ displays.
+  // - Duration-based target keeps temporal detail roughly stable for long files.
+  const maxSamples = 2000;
+  const minSamples = 256;
+  const targetSamplesByDuration = Math.round(duration * 10); // ~10 samples/sec (capped)
+  const desired = Math.max(minSamples, Math.min(maxSamples, targetSamplesByDuration));
+  const colsToRender = Math.max(8, Math.min(columns ?? outW, outW, desired));
 
   // Draw each sampled time as a 1px (or scaled) column in output.
   // We use a modest decode size to keep this fast.
@@ -169,7 +177,14 @@ async function generateVideogram({ videoEl, canvas, columns }) {
   const temp = makeTempCanvas(decodeW, decodeH);
   const ctxTmp = temp.getContext("2d", { willReadFrequently: true });
 
-  const imgCol = ctxOut.createImageData(1, outH);
+  // Render at sampling resolution then scale to output width.
+  const sampleCanvas = makeTempCanvas(colsToRender, outH);
+  const ctxSample = sampleCanvas.getContext("2d", { alpha: false });
+  ctxSample.imageSmoothingEnabled = false;
+  ctxSample.fillStyle = "#0f1620";
+  ctxSample.fillRect(0, 0, colsToRender, outH);
+
+  const imgCol = ctxSample.createImageData(1, outH);
   const colData = imgCol.data;
 
   // Preserve prior playback state.
@@ -200,8 +215,12 @@ async function generateVideogram({ videoEl, canvas, columns }) {
         colData[i + 3] = 255;
       }
 
-      ctxOut.putImageData(imgCol, outX, 0);
+      ctxSample.putImageData(imgCol, outX, 0);
     }
+
+    // Scale to full canvas width.
+    ctxOut.clearRect(0, 0, outW, outH);
+    ctxOut.drawImage(sampleCanvas, 0, 0, outW, outH);
   } finally {
     setStatus("");
     await seekVideo(videoEl, priorTime);
