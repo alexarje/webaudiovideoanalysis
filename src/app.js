@@ -109,7 +109,9 @@ async function seekVideo(videoEl, t) {
   const target = Math.max(0, Math.min(t, (videoEl.duration || 0) - 1e-3));
   if (!Number.isFinite(target)) return;
   if (Math.abs(videoEl.currentTime - target) < 1e-4) return;
-  videoEl.currentTime = target;
+  // fastSeek can be significantly quicker in some browsers.
+  if (typeof videoEl.fastSeek === "function") videoEl.fastSeek(target);
+  else videoEl.currentTime = target;
   // Always wait for the seek to complete; readyState can already be >= 2 while a seek is still pending.
   await waitForEvent(videoEl, "seeked");
 }
@@ -162,17 +164,18 @@ async function generateVideogram({ videoEl, canvas, columns }) {
   // Goal: keep "frame count" correct (progress reflects actual samples) while skipping work for
   // long videos / very wide canvases (e.g. high-DPR screens).
   //
-  // - Upper bound prevents thousands of seeks on 4k+ displays.
+  // - Upper bound prevents hundreds/thousands of seeks on long files.
   // - Duration-based target keeps temporal detail roughly stable for long files.
-  const maxSamples = 2000;
+  const maxSamples = 900;
   const minSamples = 256;
-  const targetSamplesByDuration = Math.round(duration * 10); // ~10 samples/sec (capped)
+  const samplesPerSecond = 6; // lower = faster; visuals still readable at 100px tall
+  const targetSamplesByDuration = Math.round(duration * samplesPerSecond);
   const desired = Math.max(minSamples, Math.min(maxSamples, targetSamplesByDuration));
   const colsToRender = Math.max(8, Math.min(columns ?? outW, outW, desired));
 
   // Draw each sampled time as a 1px (or scaled) column in output.
-  // We use a modest decode size to keep this fast.
-  const decodeW = Math.min(320, Math.max(96, videoEl.videoWidth || 320));
+  // We only need row averages, so decode width can be quite small.
+  const decodeW = 128;
   const decodeH = Math.round((decodeW * (videoEl.videoHeight || 180)) / (videoEl.videoWidth || 320));
   const temp = makeTempCanvas(decodeW, decodeH);
   const ctxTmp = temp.getContext("2d", { willReadFrequently: true });
@@ -232,21 +235,8 @@ function hann(n, N) {
   return 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (N - 1));
 }
 
-function stftMagnitude({ samples, sampleRate, fftSize, hopSize }) {
-  // Real-valued radix-2 FFT via naive DFT is too slow; implement a simple Cooley–Tukey iterative FFT.
-  const N = fftSize;
-  const H = hopSize;
-  const frames = Math.max(1, Math.floor((samples.length - N) / H) + 1);
-  const bins = N / 2 + 1;
-
-  const window = new Float32Array(N);
-  for (let i = 0; i < N; i++) window[i] = hann(i, N);
-
-  const mag = new Float32Array(frames * bins);
-  const re = new Float32Array(N);
-  const im = new Float32Array(N);
-
-  // Precompute bit-reversal indices.
+function createFftPlan(N) {
+  // Precompute bit-reversal indices + twiddles for iterative Cooley–Tukey FFT.
   const rev = new Uint32Array(N);
   const log2N = Math.log2(N);
   for (let i = 0; i < N; i++) {
@@ -259,7 +249,6 @@ function stftMagnitude({ samples, sampleRate, fftSize, hopSize }) {
     rev[i] = y >>> 0;
   }
 
-  // Precompute twiddles per stage.
   const twiddles = [];
   for (let size = 2; size <= N; size <<= 1) {
     const half = size >> 1;
@@ -274,44 +263,67 @@ function stftMagnitude({ samples, sampleRate, fftSize, hopSize }) {
     twiddles.push({ size, half, cos, sin });
   }
 
-  for (let f = 0; f < frames; f++) {
-    const off = f * H;
-    // Load + window into bit-reversed order.
-    for (let i = 0; i < N; i++) {
-      const s = samples[off + i] ?? 0;
-      const v = s * window[i];
-      const j = rev[i];
-      re[j] = v;
-      im[j] = 0;
-    }
+  return { N, rev, twiddles, re: new Float32Array(N), im: new Float32Array(N) };
+}
 
-    // Iterative FFT.
-    for (const stage of twiddles) {
-      const { size, half, cos, sin } = stage;
-      for (let start = 0; start < N; start += size) {
-        for (let k = 0; k < half; k++) {
-          const i0 = start + k;
-          const i1 = i0 + half;
-          const tr = re[i1] * cos[k] - im[i1] * sin[k];
-          const ti = re[i1] * sin[k] + im[i1] * cos[k];
-          re[i1] = re[i0] - tr;
-          im[i1] = im[i0] - ti;
-          re[i0] = re[i0] + tr;
-          im[i0] = im[i0] + ti;
-        }
+function fftMagOneSided({ samples, offset, window, plan, outMag }) {
+  const { N, rev, twiddles, re, im } = plan;
+  // Load + window into bit-reversed order.
+  for (let i = 0; i < N; i++) {
+    const s = samples[offset + i] ?? 0;
+    const v = s * window[i];
+    const j = rev[i];
+    re[j] = v;
+    im[j] = 0;
+  }
+
+  for (const stage of twiddles) {
+    const { size, half, cos, sin } = stage;
+    for (let start = 0; start < N; start += size) {
+      for (let k = 0; k < half; k++) {
+        const i0 = start + k;
+        const i1 = i0 + half;
+        const tr = re[i1] * cos[k] - im[i1] * sin[k];
+        const ti = re[i1] * sin[k] + im[i1] * cos[k];
+        re[i1] = re[i0] - tr;
+        im[i1] = im[i0] - ti;
+        re[i0] = re[i0] + tr;
+        im[i0] = im[i0] + ti;
       }
-    }
-
-    // Magnitudes (one-sided)
-    const base = f * bins;
-    for (let b = 0; b < bins; b++) {
-      const r = re[b];
-      const ii = im[b];
-      mag[base + b] = Math.sqrt(r * r + ii * ii);
     }
   }
 
-  return { mag, frames, bins, sampleRate, fftSize, hopSize };
+  const bins = N / 2 + 1;
+  for (let b = 0; b < bins; b++) {
+    const r = re[b];
+    const ii = im[b];
+    outMag[b] = Math.sqrt(r * r + ii * ii);
+  }
+}
+
+function stftMagnitudeSampled({ samples, fftSize, hopSize, sampleColumns }) {
+  const N = fftSize;
+  const H = hopSize;
+  const bins = N / 2 + 1;
+  const cols = sampleColumns;
+
+  const window = new Float32Array(N);
+  for (let i = 0; i < N; i++) window[i] = hann(i, N);
+
+  const plan = createFftPlan(N);
+  const mag = new Float32Array(cols * bins);
+  const tmp = new Float32Array(bins);
+
+  const maxFrame = Math.max(0, Math.floor((samples.length - N) / H));
+  for (let x = 0; x < cols; x++) {
+    const fx = x / Math.max(1, cols - 1);
+    const frameIdx = Math.min(maxFrame, Math.max(0, Math.round(fx * maxFrame)));
+    const off = frameIdx * H;
+    fftMagOneSided({ samples, offset: off, window, plan, outMag: tmp });
+    mag.set(tmp, x * bins);
+  }
+
+  return { mag, frames: cols, bins, fftSize, hopSize };
 }
 
 function mixToMono(audioBuffer) {
@@ -399,25 +411,57 @@ async function decodeAudioFromFile(file) {
   }
 }
 
+async function downsampleAudioToMono(audioBuffer, targetSampleRate) {
+  // Resample + mixdown using OfflineAudioContext (usually faster than processing full-rate data).
+  const len = audioBuffer.length;
+  const duration = len / audioBuffer.sampleRate;
+  const outLen = Math.max(1, Math.floor(duration * targetSampleRate));
+  const oac = new OfflineAudioContext(1, outLen, targetSampleRate);
+  const src = oac.createBufferSource();
+  src.buffer = audioBuffer;
+
+  const gain = oac.createGain();
+  gain.gain.value = 1 / Math.max(1, audioBuffer.numberOfChannels);
+
+  // Mixdown: connect all channels into one gain node (they sum), then average by scaling gain.
+  // This is typically plenty for visualization and avoids large JS loops.
+  const splitter = oac.createChannelSplitter(audioBuffer.numberOfChannels);
+  src.connect(splitter);
+  for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+    splitter.connect(gain, ch, 0);
+  }
+  gain.connect(oac.destination);
+
+  src.start(0);
+  const rendered = await oac.startRendering();
+  return { samples: rendered.getChannelData(0), sampleRate: rendered.sampleRate };
+}
+
 async function generateSpectrogram({ file, canvas }) {
   setStatus("Decoding audio…");
   const audioBuffer = await decodeAudioFromFile(file);
-  const mono = mixToMono(audioBuffer);
+  setStatus("Downsampling audio…");
+  const { samples: mono, sampleRate } = await downsampleAudioToMono(audioBuffer, 11025);
 
-  // Choose a moderate FFT size for speed; still decent resolution for a 100px display.
-  const fftSize = 2048;
-  const hopSize = 512;
+  // For a 100px-tall display, we can use a smaller FFT and fewer frames.
+  const fftSize = 1024;
+  const hopSize = 256;
 
-  setStatus("Computing spectrogram…");
-  const stft = stftMagnitude({
+  // Only compute the number of time-columns we will render (then scale to full width if needed).
+  const { w: outW } = setCanvasBackingStoreSize(canvas, 100);
+  const cols = Math.max(256, Math.min(900, outW));
+
+  setStatus(`Computing spectrogram… 0/${cols}`);
+  const stft = stftMagnitudeSampled({
     samples: mono,
-    sampleRate: audioBuffer.sampleRate,
+    sampleRate,
     fftSize,
     hopSize,
+    sampleColumns: cols,
   });
 
   setStatus("Rendering spectrogram…");
-  renderSpectrogramToCanvas({ canvas, stft });
+  renderSpectrogramToCanvas({ canvas, stft, widthPx: cols });
   setStatus("");
 }
 
