@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Web Audio/Video Analysis</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="title">
+        <div class="appname">Web Audio/Video Analysis</div>
+        <div class="hint">Load a video file to generate a videogram + spectrogram. Click either image to seek.</div>
+      </div>
+
+      <div class="controls">
+        <label class="filepick">
+          <input id="fileInput" type="file" accept="video/*" />
+          <span>Choose video…</span>
+        </label>
+
+        <button id="regenBtn" class="btn" type="button" disabled>Regenerate</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="player">
+        <video id="video" controls playsinline></video>
+        <div class="status" id="status"></div>
+      </section>
+
+      <section class="viz">
+        <div class="vizRow">
+          <div class="vizHeader">
+            <div class="vizTitle">Videogram (row-average over time)</div>
+            <div class="vizActions">
+              <button id="downloadVideogramBtn" class="btn" type="button" disabled>Download PNG</button>
+            </div>
+          </div>
+          <div class="canvasWrap">
+            <canvas id="videogram" height="100"></canvas>
+            <div class="playhead" id="playheadVideo"></div>
+          </div>
+        </div>
+
+        <div class="vizRow">
+          <div class="vizHeader">
+            <div class="vizTitle">Spectrogram (audio)</div>
+            <div class="vizActions">
+              <button id="downloadSpectrogramBtn" class="btn" type="button" disabled>Download PNG</button>
+            </div>
+          </div>
+          <div class="canvasWrap">
+            <canvas id="spectrogram" height="100"></canvas>
+            <div class="playhead" id="playheadAudio"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>

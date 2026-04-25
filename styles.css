@@ -1,0 +1,190 @@
+:root {
+  --bg: #0b0f16;
+  --panel: #121a25;
+  --panel2: #0f1620;
+  --text: #e7eefc;
+  --muted: #9fb0cc;
+  --accent: #6aa2ff;
+  --border: rgba(255, 255, 255, 0.08);
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji",
+    "Segoe UI Emoji";
+  color: var(--text);
+  background: radial-gradient(900px 500px at 10% 0%, rgba(106, 162, 255, 0.12), transparent 60%),
+    radial-gradient(900px 500px at 100% 30%, rgba(141, 91, 255, 0.08), transparent 55%), var(--bg);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  backdrop-filter: blur(10px);
+  background: rgba(11, 15, 22, 0.65);
+  z-index: 10;
+}
+
+.title .appname {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.title .hint {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.filepick {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  padding: 8px 10px;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  user-select: none;
+}
+.filepick input {
+  display: none;
+}
+
+.btn {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn:not(:disabled):hover {
+  border-color: rgba(106, 162, 255, 0.45);
+}
+
+.layout {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 14px 16px 22px;
+  display: grid;
+  gap: 14px;
+}
+
+.player {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  box-shadow: var(--shadow);
+  padding: 14px;
+}
+
+video {
+  width: 100%;
+  max-height: min(50vh, 520px);
+  background: #000;
+  border-radius: 12px;
+}
+
+.status {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  min-height: 16px;
+}
+
+.viz {
+  display: grid;
+  gap: 12px;
+}
+
+.vizRow {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  box-shadow: var(--shadow);
+  padding: 10px;
+}
+
+.vizHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 4px 8px;
+}
+
+.vizTitle {
+  font-weight: 650;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.canvasWrap {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--panel2);
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 100px;
+  cursor: crosshair;
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.75);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  transform: translateX(-1px);
+  opacity: 0;
+}
+
+.canvasWrap.hasMedia .playhead {
+  opacity: 1;
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .controls {
+    justify-content: space-between;
+  }
+}
+
