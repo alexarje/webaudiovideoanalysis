@@ -99,6 +99,13 @@ async function waitForEvent(target, eventName) {
   });
 }
 
+async function waitForEventOrTimeout(target, eventName, timeoutMs) {
+  return await Promise.race([
+    waitForEvent(target, eventName),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
 async function ensureVideoLoadedMetadata(videoEl) {
   if (Number.isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.videoWidth > 0) return;
   if (videoEl.readyState >= 1) return;
@@ -510,7 +517,7 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
     if (!wasPaused) videoEl.pause();
 
     // Small settle time after each seek so the audio pipeline updates.
-    const settleMs = 60;
+    const settleMs = 120;
 
     for (let x = 0; x < cols; x++) {
       const t = (x / Math.max(1, cols - 1)) * duration;
@@ -519,9 +526,21 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
 
       // Kick the media element briefly to drive the audio graph.
       // Some browsers won't update analyser data for a paused element.
-      await videoEl.play().catch(() => {});
-      await waitMs(settleMs);
-      videoEl.pause();
+      let played = false;
+      try {
+        await videoEl.play();
+        played = true;
+      } catch {
+        // If autoplay is blocked, we still try to sample after a short delay; it may work on some browsers.
+        played = false;
+      }
+      if (played) {
+        // Wait for at least one update tick (or timeout), then pause.
+        await waitForEventOrTimeout(videoEl, "timeupdate", settleMs);
+        videoEl.pause();
+      } else {
+        await waitMs(settleMs);
+      }
 
       analyser.getFloatFrequencyData(freqDb); // dB values
 
@@ -537,7 +556,8 @@ async function generateSpectrogramFromMediaElement({ videoEl, canvas }) {
         const b = Math.min(maxBin, Math.max(minBin, Math.round(Math.exp(logBin))));
 
         // freqDb is already dBFS-ish; normalize to [0..1]
-        const db = freqDb[b]; // e.g. [-100..-10]
+        const rawDb = freqDb[b];
+        const db = Number.isFinite(rawDb) ? rawDb : analyser.minDecibels; // handle -Infinity / NaN
         const v = clamp01((db + 90) / 80); // [-90..-10] -> [0..1]
 
         const i = y * 4;
@@ -690,6 +710,8 @@ els.fileInput.addEventListener("change", () => {
   const f = els.fileInput.files?.[0];
   if (!f) return;
   setVideoFromFile(f);
+  // Prime the audio context during a user gesture to reduce autoplay / resume issues later.
+  ensureMediaAudioGraph(els.video).catch(() => {});
 });
 
 els.regenBtn.addEventListener("click", () => {
