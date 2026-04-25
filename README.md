@@ -40,4 +40,4 @@ Then open `http://localhost:5173` and choose a video file.
 
 ## Technical docs
 
-See `WIKI/` for deeper technical notes (algorithms, parameters, performance constraints, and extension ideas).
+See the project wiki for deeper technical notes (algorithms, parameters, performance constraints, and extension ideas).
