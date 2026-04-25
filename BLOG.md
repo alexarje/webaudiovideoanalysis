@@ -84,6 +84,8 @@ For multi‑GB video files, the app falls back to a different approach:
 - It builds an **audio graph** from the `<video>` element (`AudioContext → MediaElementAudioSourceNode → AnalyserNode`).
 - It seeks through the video across time and samples the analyser’s frequency bins to construct the spectrogram columns.
 
+To avoid audible glitches while sampling, the fallback sets `video.volume = 0` (rather than relying on `muted`, which can produce silence in the analyser on some browsers).
+
 This avoids loading the entire audio track into memory, at the cost of being more dependent on the browser’s media pipeline and seek behavior.
 
 ## Export: download PNGs

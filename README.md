@@ -12,7 +12,7 @@ Static web app to load a local video file, play it back, and generate:
 - **Videogram**: samples the video at many time points; for each sampled frame it downsamples the frame, computes the average luminance per row, and stacks those row-averages across time.
 - **Spectrogram**:
   - For typical file sizes, it decodes audio in the browser, downsamples to mono, then computes a sampled STFT (only the time-columns that will be drawn).
-  - For very large files (or if decode fails), it falls back to sampling audio frequency data from the `<video>` element via `AudioContext + AnalyserNode` while seeking.
+  - For very large files (or if decode fails), it falls back to sampling audio frequency data from the `<video>` element via `AudioContext + AnalyserNode` while seeking (it uses `volume=0` rather than `muted` during sampling for better cross-browser reliability).
 
 ## Usage
 
