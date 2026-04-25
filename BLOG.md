@@ -75,6 +75,17 @@ Instead of computing an STFT frame for every hop across the entire audio, the ap
 
 This keeps spectrogram generation fast even for longer recordings.
 
+### Large-file constraint: `decodeAudioData` and the 2GB limit
+
+Browsers commonly impose a hard limit: `BaseAudioContext.decodeAudioData()` can’t accept an input `ArrayBuffer` larger than ~2GB.
+
+For multi‑GB video files, the app falls back to a different approach:
+
+- It builds an **audio graph** from the `<video>` element (`AudioContext → MediaElementAudioSourceNode → AnalyserNode`).
+- It seeks through the video across time and samples the analyser’s frequency bins to construct the spectrogram columns.
+
+This avoids loading the entire audio track into memory, at the cost of being more dependent on the browser’s media pipeline and seek behavior.
+
 ## Export: download PNGs
 
 Both canvases can be exported with a single click. The app uses the canvas `toDataURL("image/png")` method and triggers a download with a temporary `<a download>` link.
