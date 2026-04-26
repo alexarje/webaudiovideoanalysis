@@ -744,9 +744,9 @@ async function generateSpectrogram({ file, canvas }) {
   const safeDecodeLimit = Math.floor(twoGb * 0.85);
 
   if (file.size > safeDecodeLimit) {
-    // For very large files, waveform is more stable than trying to compute a spectrogram from the media element.
-    await generateWaveformFromMediaElement({ videoEl: els.video, canvas });
-    return;
+    throw new Error(
+      "File is too large to decode audio in-browser for a spectrogram (>~2GB). Use an audio proxy (e.g. a small WAV) for spectrogram generation."
+    );
   }
 
   try {
@@ -776,12 +776,12 @@ async function generateSpectrogram({ file, canvas }) {
     renderSpectrogramToCanvas({ canvas, stft, widthPx: cols });
     setStatus("");
   } catch (e) {
-    // If decode fails (including >2GB errors), fall back to analyser sampling.
+    // Only intercept the specific >2GB decode limit case.
     const msg = String(e?.message || e);
-    if (msg.includes("decodeAudioData") || msg.includes("2 GB") || msg.includes("2GB")) {
-      console.warn("decodeAudioData failed; falling back to waveform.", e);
-      await generateWaveformFromMediaElement({ videoEl: els.video, canvas });
-      return;
+    if (msg.includes("larger than 2 GB") || msg.includes("larger than 2GB") || msg.includes("2 GB")) {
+      throw new Error(
+        "Audio decode failed due to the browser's ~2GB decodeAudioData limit. For a spectrogram on large files, use an audio proxy (small WAV/MP3)."
+      );
     }
     throw e;
   }
