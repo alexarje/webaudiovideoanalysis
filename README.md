@@ -1,6 +1,6 @@
-# Web Audio Video Analysis
+# VideoScrub
 
-Static web app to load a local video file, play it back, and generate:
+VideoScrub is a static web app to load a local video file, play it back, and generate:
 
 - **Videogram**: per-frame row-average stacked over time (100px tall, full width)
 - **Spectrogram**: time–frequency visualization (100px tall, full width)

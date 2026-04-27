@@ -29,7 +29,7 @@ let currentObjectUrl = null;
 /** @type {File | null} */
 let currentFile = null;
 
-const STORAGE_KEY = "webaudiovideoanalysis.settings.v1";
+const STORAGE_KEY = "videoscrub.settings.v1";
 
 const state = {
   // Time window (zoom). If null, use full duration.

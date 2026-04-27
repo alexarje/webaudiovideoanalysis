@@ -1,4 +1,4 @@
-# Web Audio/Video Analysis in the Browser: Videograms + Spectrograms
+# VideoScrub: videograms + spectrograms in the browser
 
 This project is a small, static web app that turns a local video file into two compact “timelines” you can see and scrub:
 
