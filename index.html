@@ -18,11 +18,71 @@
           <span>Choose video…</span>
         </label>
 
+        <button id="settingsBtn" class="btn" type="button">Settings</button>
+        <button id="resetZoomBtn" class="btn" type="button" disabled>Reset zoom</button>
         <button id="regenBtn" class="btn" type="button" disabled>Regenerate</button>
       </div>
     </header>
 
     <main class="layout">
+      <section id="settingsPanel" class="settingsPanel" hidden>
+        <div class="settingsGrid">
+          <div class="field">
+            <label for="audioSampleRate">Audio sample rate</label>
+            <select id="audioSampleRate">
+              <option value="8000">8000 Hz</option>
+              <option value="11025" selected>11025 Hz</option>
+              <option value="16000">16000 Hz</option>
+              <option value="22050">22050 Hz</option>
+              <option value="44100">44100 Hz</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="fftSize">FFT size</label>
+            <select id="fftSize">
+              <option value="512">512</option>
+              <option value="1024" selected>1024</option>
+              <option value="2048">2048</option>
+              <option value="4096">4096</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="colorMapSpec">Spectrogram colormap</label>
+            <select id="colorMapSpec">
+              <option value="heat" selected>Heat</option>
+              <option value="magma">Magma</option>
+              <option value="gray">Grayscale</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="colorMapVideo">Videogram colormap</label>
+            <select id="colorMapVideo">
+              <option value="blueyellow" selected>Blue → Yellow</option>
+              <option value="gray">Grayscale</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="videoDecodeW">Videogram decode width</label>
+            <input id="videoDecodeW" type="number" min="32" max="512" step="1" value="128" />
+          </div>
+
+          <div class="field">
+            <label for="videoSamplesPerSec">Videogram samples/sec</label>
+            <input id="videoSamplesPerSec" type="number" min="1" max="30" step="1" value="6" />
+          </div>
+        </div>
+
+        <div class="settingsFooter">
+          <div class="hint">
+            Drag on a visualization to select a range. Use Reset zoom to return to full duration.
+          </div>
+        </div>
+      </section>
+
       <section class="player">
         <video id="video" controls playsinline></video>
         <div class="status" id="status"></div>
@@ -34,10 +94,12 @@
             <div class="vizTitle">Videogram (row-average over time)</div>
             <div class="vizActions">
               <button id="downloadVideogramBtn" class="btn" type="button" disabled>Download PNG</button>
+              <button id="downloadVideogramCsvBtn" class="btn" type="button" disabled>Download CSV</button>
             </div>
           </div>
           <div class="canvasWrap">
             <canvas id="videogram" height="100"></canvas>
+            <div class="selection" id="selectionVideo" hidden></div>
             <div class="playhead" id="playheadVideo"></div>
           </div>
         </div>
@@ -47,10 +109,12 @@
             <div class="vizTitle">Spectrogram (audio)</div>
             <div class="vizActions">
               <button id="downloadSpectrogramBtn" class="btn" type="button" disabled>Download PNG</button>
+              <button id="downloadSpectrogramCsvBtn" class="btn" type="button" disabled>Download CSV</button>
             </div>
           </div>
           <div class="canvasWrap">
             <canvas id="spectrogram" height="100"></canvas>
+            <div class="selection" id="selectionAudio" hidden></div>
             <div class="playhead" id="playheadAudio"></div>
           </div>
         </div>

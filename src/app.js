@@ -1,12 +1,25 @@
 const els = {
   fileInput: document.getElementById("fileInput"),
   regenBtn: document.getElementById("regenBtn"),
+  settingsBtn: document.getElementById("settingsBtn"),
+  resetZoomBtn: document.getElementById("resetZoomBtn"),
+  settingsPanel: document.getElementById("settingsPanel"),
+  audioSampleRate: document.getElementById("audioSampleRate"),
+  fftSize: document.getElementById("fftSize"),
+  colorMapSpec: document.getElementById("colorMapSpec"),
+  colorMapVideo: document.getElementById("colorMapVideo"),
+  videoDecodeW: document.getElementById("videoDecodeW"),
+  videoSamplesPerSec: document.getElementById("videoSamplesPerSec"),
   video: document.getElementById("video"),
   status: document.getElementById("status"),
   videogram: document.getElementById("videogram"),
   spectrogram: document.getElementById("spectrogram"),
   downloadVideogramBtn: document.getElementById("downloadVideogramBtn"),
+  downloadVideogramCsvBtn: document.getElementById("downloadVideogramCsvBtn"),
   downloadSpectrogramBtn: document.getElementById("downloadSpectrogramBtn"),
+  downloadSpectrogramCsvBtn: document.getElementById("downloadSpectrogramCsvBtn"),
+  selectionVideo: document.getElementById("selectionVideo"),
+  selectionAudio: document.getElementById("selectionAudio"),
   playheadVideo: document.getElementById("playheadVideo"),
   playheadAudio: document.getElementById("playheadAudio"),
 };
@@ -16,12 +29,70 @@ let currentObjectUrl = null;
 /** @type {File | null} */
 let currentFile = null;
 
+const STORAGE_KEY = "webaudiovideoanalysis.settings.v1";
+
+const state = {
+  // Time window (zoom). If null, use full duration.
+  viewWindow: /** @type {{t0:number, t1:number} | null} */ (null),
+  selection: /** @type {{t0:number, t1:number} | null} */ (null),
+  // Raw data for CSV export (generated at sampling resolution, before scaling).
+  videogram: /** @type {{cols:number, rows:number, t0:number, t1:number, data:Float32Array} | null} */ (null),
+  spectrogram: /** @type {{cols:number, bins:number, sampleRate:number, fftSize:number, hopSize:number, t0:number, t1:number, mag:Float32Array} | null} */ (null),
+};
+
+const settings = {
+  audioSampleRate: 11025,
+  fftSize: 1024,
+  colorMapSpec: "heat",
+  colorMapVideo: "blueyellow",
+  videoDecodeW: 128,
+  videoSamplesPerSec: 6,
+};
+
 function setStatus(msg) {
   els.status.textContent = msg || "";
 }
 
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
+}
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    Object.assign(settings, parsed);
+  } catch {
+    // ignore
+  }
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // ignore
+  }
+}
+
+function applySettingsToUi() {
+  if (els.audioSampleRate) els.audioSampleRate.value = String(settings.audioSampleRate);
+  if (els.fftSize) els.fftSize.value = String(settings.fftSize);
+  if (els.colorMapSpec) els.colorMapSpec.value = String(settings.colorMapSpec);
+  if (els.colorMapVideo) els.colorMapVideo.value = String(settings.colorMapVideo);
+  if (els.videoDecodeW) els.videoDecodeW.value = String(settings.videoDecodeW);
+  if (els.videoSamplesPerSec) els.videoSamplesPerSec.value = String(settings.videoSamplesPerSec);
+}
+
+function readSettingsFromUi() {
+  settings.audioSampleRate = Number.parseInt(els.audioSampleRate.value, 10) || 11025;
+  settings.fftSize = Number.parseInt(els.fftSize.value, 10) || 1024;
+  settings.colorMapSpec = els.colorMapSpec.value || "heat";
+  settings.colorMapVideo = els.colorMapVideo.value || "blueyellow";
+  settings.videoDecodeW = Math.max(32, Math.min(512, Number.parseInt(els.videoDecodeW.value, 10) || 128));
+  settings.videoSamplesPerSec = Math.max(1, Math.min(30, Number.parseInt(els.videoSamplesPerSec.value, 10) || 6));
+  saveSettings();
 }
 
 function setCanvasBackingStoreSize(canvas, cssHeight = 100) {
@@ -32,6 +103,15 @@ function setCanvasBackingStoreSize(canvas, cssHeight = 100) {
   if (canvas.width !== w) canvas.width = w;
   if (canvas.height !== h) canvas.height = h;
   return { w, h, dpr };
+}
+
+function getEffectiveWindow() {
+  const v = els.video;
+  const duration = v.duration;
+  if (!Number.isFinite(duration) || duration <= 0) return { t0: 0, t1: 1 };
+  const vw = state.viewWindow;
+  if (!vw) return { t0: 0, t1: duration };
+  return { t0: Math.max(0, Math.min(duration, vw.t0)), t1: Math.max(0, Math.min(duration, vw.t1)) };
 }
 
 function drawPlaceholder(canvas, label) {
@@ -50,7 +130,8 @@ function updatePlayheads() {
   const v = els.video;
   const duration = v.duration;
   if (!Number.isFinite(duration) || duration <= 0) return;
-  const frac = clamp01(v.currentTime / duration);
+  const { t0, t1 } = getEffectiveWindow();
+  const frac = clamp01((v.currentTime - t0) / Math.max(1e-6, t1 - t0));
   const set = (playhead, canvas) => {
     const wrap = canvas.parentElement;
     if (wrap) wrap.classList.add("hasMedia");
@@ -60,15 +141,96 @@ function updatePlayheads() {
   set(els.playheadAudio, els.spectrogram);
 }
 
-function hookCanvasSeeking(canvas) {
+function hookCanvasSeekingAndSelection(canvas, selectionEl) {
+  let drag = null;
+
+  const updateSelectionEls = () => {
+    const vw = getEffectiveWindow();
+    const sel = state.selection;
+    if (!sel) {
+      selectionEl.hidden = true;
+      els.resetZoomBtn.disabled = !state.viewWindow;
+      return;
+    }
+    const a = clamp01((sel.t0 - vw.t0) / Math.max(1e-6, vw.t1 - vw.t0));
+    const b = clamp01((sel.t1 - vw.t0) / Math.max(1e-6, vw.t1 - vw.t0));
+    const x0 = Math.min(a, b) * 100;
+    const x1 = Math.max(a, b) * 100;
+    selectionEl.hidden = false;
+    selectionEl.style.left = `${x0}%`;
+    selectionEl.style.width = `${Math.max(0, x1 - x0)}%`;
+    els.resetZoomBtn.disabled = !state.viewWindow;
+  };
+
+  const setSharedSelection = (t0, t1) => {
+    state.selection = { t0: Math.min(t0, t1), t1: Math.max(t0, t1) };
+    // Mirror selection across both canvases.
+    updateSelectionOverlay();
+  };
+
+  const updateSelectionOverlay = () => {
+    // Update both overlays from the shared selection.
+    const vw = getEffectiveWindow();
+    const sel = state.selection;
+    const apply = (el) => {
+      if (!sel) {
+        el.hidden = true;
+        return;
+      }
+      const a = clamp01((sel.t0 - vw.t0) / Math.max(1e-6, vw.t1 - vw.t0));
+      const b = clamp01((sel.t1 - vw.t0) / Math.max(1e-6, vw.t1 - vw.t0));
+      const x0 = Math.min(a, b) * 100;
+      const x1 = Math.max(a, b) * 100;
+      el.hidden = false;
+      el.style.left = `${x0}%`;
+      el.style.width = `${Math.max(0, x1 - x0)}%`;
+    };
+    apply(els.selectionVideo);
+    apply(els.selectionAudio);
+    els.resetZoomBtn.disabled = !state.viewWindow;
+  };
+
   canvas.addEventListener("pointerdown", (e) => {
     const v = els.video;
     const duration = v.duration;
     if (!Number.isFinite(duration) || duration <= 0) return;
     const r = canvas.getBoundingClientRect();
     const frac = clamp01((e.clientX - r.left) / r.width);
-    v.currentTime = frac * duration;
+    const { t0, t1 } = getEffectiveWindow();
+    const t = t0 + frac * (t1 - t0);
+
+    // Shift+drag selects. Plain click seeks.
+    if (e.shiftKey) {
+      drag = { startT: t, pointerId: e.pointerId };
+      canvas.setPointerCapture(e.pointerId);
+      setSharedSelection(t, t);
+      updateSelectionEls();
+      return;
+    }
+
+    v.currentTime = t;
   });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const r = canvas.getBoundingClientRect();
+    const frac = clamp01((e.clientX - r.left) / r.width);
+    const { t0, t1 } = getEffectiveWindow();
+    const t = t0 + frac * (t1 - t0);
+    setSharedSelection(drag.startT, t);
+  });
+
+  canvas.addEventListener("pointerup", (e) => {
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    drag = null;
+  });
+
+  // Expose updater
+  canvas._updateSelectionOverlay = updateSelectionOverlay;
+}
+
+function updateSelectionOverlay() {
+  if (els.videogram?._updateSelectionOverlay) els.videogram._updateSelectionOverlay();
 }
 
 function downloadCanvasPng(canvas, filename) {
@@ -78,6 +240,18 @@ function downloadCanvasPng(canvas, filename) {
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+function downloadTextFile(text, filename, mime = "text/plain") {
+  const blob = new Blob([text], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.download = filename;
+  a.href = url;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2500);
 }
 
 async function waitForEvent(target, eventName) {
@@ -121,6 +295,17 @@ async function seekVideo(videoEl, t) {
   else videoEl.currentTime = target;
   // Always wait for the seek to complete; readyState can already be >= 2 while a seek is still pending.
   await waitForEvent(videoEl, "seeked");
+}
+
+async function waitForFreshVideoFrame(videoEl, timeoutMs = 250) {
+  // requestVideoFrameCallback gives a better guarantee that the decoded frame is ready after seek.
+  if (typeof videoEl.requestVideoFrameCallback !== "function") return;
+  await Promise.race([
+    new Promise((resolve) => {
+      videoEl.requestVideoFrameCallback(() => resolve());
+    }),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
 }
 
 function makeTempCanvas(w, h) {
@@ -173,16 +358,19 @@ async function generateVideogram({ videoEl, canvas, columns }) {
   //
   // - Upper bound prevents hundreds/thousands of seeks on long files.
   // - Duration-based target keeps temporal detail roughly stable for long files.
+  const { t0: win0, t1: win1 } = getEffectiveWindow();
+  const windowDur = Math.max(1e-6, win1 - win0);
+
   const maxSamples = 900;
   const minSamples = 256;
-  const samplesPerSecond = 6; // lower = faster; visuals still readable at 100px tall
-  const targetSamplesByDuration = Math.round(duration * samplesPerSecond);
+  const samplesPerSecond = settings.videoSamplesPerSec; // lower = faster; visuals still readable at 100px tall
+  const targetSamplesByDuration = Math.round(windowDur * samplesPerSecond);
   const desired = Math.max(minSamples, Math.min(maxSamples, targetSamplesByDuration));
   const colsToRender = Math.max(8, Math.min(columns ?? outW, outW, desired));
 
   // Draw each sampled time as a 1px (or scaled) column in output.
   // We only need row averages, so decode width can be quite small.
-  const decodeW = 128;
+  const decodeW = settings.videoDecodeW;
   const decodeH = Math.round((decodeW * (videoEl.videoHeight || 180)) / (videoEl.videoWidth || 320));
   const temp = makeTempCanvas(decodeW, decodeH);
   const ctxTmp = temp.getContext("2d", { willReadFrequently: true });
@@ -203,22 +391,36 @@ async function generateVideogram({ videoEl, canvas, columns }) {
   try {
     if (!wasPaused) videoEl.pause();
 
+    const raw = new Float32Array(colsToRender * outH);
+
     for (let outX = 0; outX < colsToRender; outX++) {
-      const t = (outX / Math.max(1, colsToRender - 1)) * duration;
+      const t = win0 + (outX / Math.max(1, colsToRender - 1)) * windowDur;
       setStatus(`Generating videogram… ${outX + 1}/${colsToRender}`);
       await seekVideo(videoEl, t);
+      await waitForFreshVideoFrame(videoEl);
 
       ctxTmp.drawImage(videoEl, 0, 0, decodeW, decodeH);
       const frame = ctxTmp.getImageData(0, 0, decodeW, decodeH);
       const bins = rowAveragesToBins(frame, decodeW, decodeH, outH);
 
-      // Map luminance to false-color (blue->cyan->yellow->white)
+      for (let y = 0; y < outH; y++) raw[outX * outH + y] = bins[y];
+
+      // Map luminance to color
       for (let y = 0; y < outH; y++) {
         const v = clamp01(bins[y] / 255);
         const i = y * 4;
-        const r = Math.round(255 * Math.pow(v, 0.85));
-        const g = Math.round(255 * Math.pow(v, 0.65));
-        const b = Math.round(255 * (0.25 + 0.75 * Math.pow(v, 0.9)));
+        let r, g, b;
+        if (settings.colorMapVideo === "gray") {
+          const c = Math.round(255 * v);
+          r = c;
+          g = c;
+          b = c;
+        } else {
+          // blueyellow
+          r = Math.round(255 * Math.pow(v, 0.85));
+          g = Math.round(255 * Math.pow(v, 0.65));
+          b = Math.round(255 * (0.25 + 0.75 * Math.pow(v, 0.9)));
+        }
         colData[i] = r;
         colData[i + 1] = g;
         colData[i + 2] = b;
@@ -227,6 +429,8 @@ async function generateVideogram({ videoEl, canvas, columns }) {
 
       ctxSample.putImageData(imgCol, outX, 0);
     }
+
+    state.videogram = { cols: colsToRender, rows: outH, t0: win0, t1: win1, data: raw };
 
     // Scale to full canvas width.
     ctxOut.clearRect(0, 0, outW, outH);
@@ -380,10 +584,23 @@ function renderSpectrogramToCanvas({ canvas, stft, widthPx }) {
       const db = 20 * Math.log10(m + 1e-6); // [-120..0]
       const v = clamp01((db + 80) / 80); // map [-80..0] -> [0..1]
 
-      // False color: dark -> purple -> orange -> white
-      const r = Math.round(255 * Math.pow(v, 0.85));
-      const g = Math.round(220 * Math.pow(v, 1.35));
-      const bb = Math.round(255 * (0.15 + 0.85 * Math.pow(v, 0.7)));
+      let r, g, bb;
+      if (settings.colorMapSpec === "gray") {
+        const c = Math.round(255 * v);
+        r = c;
+        g = c;
+        bb = c;
+      } else if (settings.colorMapSpec === "magma") {
+        // lightweight "magma-ish" ramp
+        r = Math.round(255 * Math.pow(v, 0.65));
+        g = Math.round(180 * Math.pow(v, 1.2));
+        bb = Math.round(255 * (0.08 + 0.92 * Math.pow(v, 1.8)));
+      } else {
+        // heat (default): dark -> purple -> orange -> white
+        r = Math.round(255 * Math.pow(v, 0.85));
+        g = Math.round(220 * Math.pow(v, 1.35));
+        bb = Math.round(255 * (0.15 + 0.85 * Math.pow(v, 0.7)));
+      }
 
       const i = (y * targetW + x) * 4;
       dst[i] = r;
@@ -753,11 +970,11 @@ async function generateSpectrogram({ file, canvas }) {
     setStatus("Decoding audio…");
     const audioBuffer = await decodeAudioFromFile(file);
     setStatus("Downsampling audio…");
-    const { samples: mono, sampleRate } = await downsampleAudioToMono(audioBuffer, 11025);
+    const { samples: mono, sampleRate } = await downsampleAudioToMono(audioBuffer, settings.audioSampleRate);
 
     // For a 100px-tall display, we can use a smaller FFT and fewer frames.
-    const fftSize = 1024;
-    const hopSize = 256;
+    const fftSize = settings.fftSize;
+    const hopSize = Math.max(64, fftSize >> 2);
 
     // Only compute the number of time-columns we will render (then scale to full width if needed).
     const { w: outW } = setCanvasBackingStoreSize(canvas, 100);
@@ -775,6 +992,18 @@ async function generateSpectrogram({ file, canvas }) {
     setStatus("Rendering spectrogram…");
     renderSpectrogramToCanvas({ canvas, stft, widthPx: cols });
     setStatus("");
+
+    const { t0, t1 } = getEffectiveWindow();
+    state.spectrogram = {
+      cols,
+      bins: stft.bins,
+      sampleRate,
+      fftSize,
+      hopSize,
+      t0,
+      t1,
+      mag: stft.mag,
+    };
   } catch (e) {
     // Only intercept the specific >2GB decode limit case.
     const msg = String(e?.message || e);
@@ -792,6 +1021,8 @@ async function regenerateAll() {
 
   els.downloadVideogramBtn.disabled = true;
   els.downloadSpectrogramBtn.disabled = true;
+  els.downloadVideogramCsvBtn.disabled = true;
+  els.downloadSpectrogramCsvBtn.disabled = true;
   els.regenBtn.disabled = true;
 
   try {
@@ -813,6 +1044,8 @@ async function regenerateAll() {
 
     els.downloadVideogramBtn.disabled = false;
     els.downloadSpectrogramBtn.disabled = false;
+    els.downloadVideogramCsvBtn.disabled = !state.videogram;
+    els.downloadSpectrogramCsvBtn.disabled = !state.spectrogram;
   } catch (e) {
     console.error(e);
     setStatus(`Error: ${e?.message || String(e)}`);
@@ -857,8 +1090,8 @@ function onResize() {
 }
 
 // Wiring
-hookCanvasSeeking(els.videogram);
-hookCanvasSeeking(els.spectrogram);
+hookCanvasSeekingAndSelection(els.videogram, els.selectionVideo);
+hookCanvasSeekingAndSelection(els.spectrogram, els.selectionAudio);
 
 els.fileInput.addEventListener("change", () => {
   const f = els.fileInput.files?.[0];
@@ -869,6 +1102,7 @@ els.fileInput.addEventListener("change", () => {
 });
 
 els.regenBtn.addEventListener("click", () => {
+  readSettingsFromUi();
   regenerateAll();
 });
 
@@ -880,6 +1114,74 @@ els.downloadSpectrogramBtn.addEventListener("click", () => {
   downloadCanvasPng(els.spectrogram, "spectrogram.png");
 });
 
+els.downloadVideogramCsvBtn.addEventListener("click", () => {
+  const vg = state.videogram;
+  if (!vg) return;
+  // Rows = y index, Cols = time sample index
+  const lines = [];
+  lines.push(`# videogram rows=${vg.rows} cols=${vg.cols} t0=${vg.t0} t1=${vg.t1}`);
+  const header = ["y"].concat(
+    Array.from({ length: vg.cols }, (_, i) => {
+      const t = vg.t0 + (i / Math.max(1, vg.cols - 1)) * (vg.t1 - vg.t0);
+      return t.toFixed(6);
+    })
+  );
+  lines.push(header.join(","));
+  for (let y = 0; y < vg.rows; y++) {
+    const row = [String(y)];
+    for (let x = 0; x < vg.cols; x++) row.push(vg.data[x * vg.rows + y].toFixed(3));
+    lines.push(row.join(","));
+  }
+  downloadTextFile(lines.join("\n"), "videogram.csv", "text/csv");
+});
+
+els.downloadSpectrogramCsvBtn.addEventListener("click", () => {
+  const sp = state.spectrogram;
+  if (!sp) return;
+  const lines = [];
+  lines.push(
+    `# spectrogram cols=${sp.cols} bins=${sp.bins} sampleRate=${sp.sampleRate} fftSize=${sp.fftSize} hopSize=${sp.hopSize} t0=${sp.t0} t1=${sp.t1}`
+  );
+  lines.push(["col", "time_s", "bin", "freq_hz", "mag"].join(","));
+  const bins = sp.bins;
+  for (let x = 0; x < sp.cols; x++) {
+    const t = sp.t0 + (x / Math.max(1, sp.cols - 1)) * (sp.t1 - sp.t0);
+    const base = x * bins;
+    for (let b = 0; b < bins; b++) {
+      const freq = (b * sp.sampleRate) / sp.fftSize;
+      lines.push([x, t.toFixed(6), b, freq.toFixed(3), sp.mag[base + b].toExponential(6)].join(","));
+    }
+  }
+  downloadTextFile(lines.join("\n"), "spectrogram.csv", "text/csv");
+});
+
+els.settingsBtn.addEventListener("click", () => {
+  const isHidden = els.settingsPanel.hasAttribute("hidden");
+  if (isHidden) els.settingsPanel.removeAttribute("hidden");
+  else els.settingsPanel.setAttribute("hidden", "");
+});
+
+els.resetZoomBtn.addEventListener("click", () => {
+  state.viewWindow = null;
+  state.selection = null;
+  updateSelectionOverlay();
+  updatePlayheads();
+  regenerateAll();
+});
+
+for (const el of [
+  els.audioSampleRate,
+  els.fftSize,
+  els.colorMapSpec,
+  els.colorMapVideo,
+  els.videoDecodeW,
+  els.videoSamplesPerSec,
+]) {
+  el.addEventListener("change", () => {
+    readSettingsFromUi();
+  });
+}
+
 els.video.addEventListener("timeupdate", updatePlayheads);
 els.video.addEventListener("seeked", updatePlayheads);
 els.video.addEventListener("loadedmetadata", updatePlayheads);
@@ -889,4 +1191,7 @@ window.addEventListener("resize", onResize);
 drawPlaceholder(els.videogram, "Videogram will appear here");
 drawPlaceholder(els.spectrogram, "Spectrogram will appear here");
 setStatus("Choose a video file to begin.");
+
+loadSettings();
+applySettingsToUi();
 
